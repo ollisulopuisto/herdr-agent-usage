@@ -181,6 +181,13 @@ pub fn enrich_cache_session(
             0
         },
         |line| {
+            // Most transcript lines (user prompts, tool results, progress)
+            // carry no `usage` object, and only `usage` feeds the totals, so
+            // skip the full JSON parse for them. The substring check is exact
+            // for misses: a line without "usage" cannot contain the field.
+            if !line.contains("\"usage\"") {
+                return;
+            }
             let Ok(entry) = serde_json::from_str::<Value>(line) else {
                 return;
             };
@@ -413,5 +420,36 @@ mod tests {
                 .session_totals,
             second_cache.session_totals
         );
+    }
+
+    #[test]
+    fn transcript_lines_without_a_usage_key_are_skipped_but_false_positives_parse() {
+        // A tool result or prompt mentioning "usage" in its text still parses
+        // (and contributes nothing); lines without the substring never could.
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let lines = br#"{"type":"user","message":{"role":"user","content":"check the usage docs"}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"usage: herdr [--watch]"}]}}
+{"type":"progress","data":{"usage":"not the token counter"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":7,"cache_read_input_tokens":70,"cache_creation_input_tokens":3}}}
+not json at all but says "usage"
+"#;
+        std::fs::write(transcript.path(), lines).unwrap();
+        let statusline = json!({
+            "session_id": "session-skip",
+            "transcript_path": transcript.path(),
+        });
+        let mut snapshot = snapshot_with_cache();
+        enrich_cache_session(&mut snapshot, &statusline, None);
+        let totals = snapshot
+            .context
+            .unwrap()
+            .cache
+            .unwrap()
+            .session_totals
+            .unwrap();
+        assert_eq!(totals.fresh_input_tokens, 7);
+        assert_eq!(totals.read_tokens, 70);
+        assert_eq!(totals.creation_tokens, 3);
     }
 }
